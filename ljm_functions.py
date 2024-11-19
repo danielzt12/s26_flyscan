@@ -3,7 +3,9 @@ import time
 import numpy as np
 from fractions import gcd
 
-ljm.loadConstantsFromFile("ljm_constants.json")
+ljm.loadConstantsFromFile("/home/sector26/pythonscripts/Tao/flyscan/ljm_scripts/LJM/ljm_constants.json")
+#ljm.loadConstantsFromFile("/home/beams/USER26ID/ljm_scripts/LJM/ljm_startup_configs.json")
+
 
 def listallT7():
 
@@ -73,90 +75,53 @@ class T7_ID26:
         #print "setting DACs to 0..."
         #self.write("DAC0", 0)
         #self.write("DAC1", 0)
-    
-
-    def send_digital(self, data, t1, buffersize=4096):
-
-        t0 = 0.01
-        ScanRate = 2e3/(gcd(t0*1000,t1*1000))
-        if ScanRate > 1000:
-            # print "ScanRate too high :", ScanRate
-            return 0
-        if len(data.shape) == 1:
-            data = (data[np.newaxis, :]>0)
-        self.stop_streaming()
-        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
-        # print("setting scan rate to {0}".format(r))
-        data = (data * np.arange(data.shape[0])[:,np.newaxis]).astype(int)
-        # print data.dtype
-        data = np.left_shift(1,data).sum(0)
-        data = (np.array([1]*int((t1-t0)*ScanRate)+[0]*int(t0*ScanRate)) * np.c_[data]).flatten()
-        data = data * np.ones(2,dtype=int).reshape(2,1)
-        # print data
-        data_inhib = 0x7FFFFF - data
-        # print "Total data to be transmitted: {0}x{1} at {2} Hz".format(data.shape[0], data.shape[1], ScanRate)
-        self.map_stream_output(0, "FIO_STATE", buffersize=buffersize)
-        self.map_stream_output(1, "FIO_DIRECTION", buffersize=buffersize)
-        #self.map_stream_output(2, "DIO_INHIBIT", buffersize=buffersize)
-        self.start_streaming(["STREAM_OUT0", "STREAM_OUT1"])
-        self.data_to_buffer([0, 1], data, buffertype = "U16")
-        self.stop_streaming()
 
 
-    def send_fakedigital_ringbuffer(self, data_raw, t1, t0 = None, out_num = 0, dac_num = 0, buffersize = 4096, vmax = 3.3):
-        
-        if t0 == None:
-            t0 = t1 - 0.005 # up time has been fixed to 5 ms
-        ScanRate = 1000 # ScanRate has been fixed to 1kHz
-        #ScanRate = 5e3/(gcd(t0*1000,t1*1000))
-        if not isinstance(out_num, (list,)):
-            out_num = [out_num]; dac_num = [dac_num]; data_raw = data_raw[np.newaxis,:]
-        envelop = np.array([1]*int((t1-t0)*ScanRate)+[0]*int(t0*ScanRate))
-        data = np.zeros((data_raw.shape[0], data_raw.shape[1]*envelop.shape[0]))
-        for i in range(data.shape[0]):
-            data[i] = (envelop * np.c_[data_raw[i]>0]).flatten()*vmax
-        self.send_analog_ringbuffer(data, ScanRate, out_num, dac_num, buffersize)
+    def send_digital(self, data_raw, t1, t0, inverted, out_num = 0, external = False):
 
-
-    def send_analog_ringbuffer(self, data, ScanRate, out_num = 0, dac_num = 0, buffersize = 4096):
-
-        if not isinstance(out_num, (list,)):
-            out_num = [out_num]; dac_num = [dac_num]; data = data[np.newaxis,:]
-        self.stop_streaming()
-        # print "Total data to be transmitted: {0}x{1} at {2} Hz".format(data.shape[0], data.shape[1], ScanRate)
-        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
-        # print("setting scan rate to {0}".format(r))
-        for i in range(data.shape[0]):
-            self.map_stream_output(out_num[i], "DAC{0}".format(dac_num[i]), buffersize=buffersize)
-        self.start_streaming(" ".join(map("STREAM_OUT{0}".format, out_num)).split())
-        self.data_to_ringbuffer(out_num, data, buffertype = "F32")
-
-
-    def send_fakedigital_singlebuffer(self, data_raw, t1, t0 = 0.005, out_num = 0, dac_num = 0, vmax = 3.3, inverted = False):
+        data_stream = np.zeros((16384), dtype=np.uint16)
+        data_1 = 0
+        data_0 = 0
+        for i in range(len(inverted)):
+            if not inverted[i]:
+                data_1 += 2**(i+1)
+            else:
+                data_0 += 2**(i+1)
         
         n_data = data_raw.shape[0]
-        n_total = int(16382/2/n_data)
+        n_total = int(16382/n_data) # removed two bits to make sure i can control the starting and ending bit
         n_down = max(int(round(t0/t1*n_total,0)), 1)
         n_up = int(n_total - n_down)
         ScanRate = 1/t1*n_total # trigger at rise edge
-        data = (np.ones((n_data,n_total))*np.array([1]*n_up+[0]*n_down)).flatten()
-        data = np.append(np.zeros(1), data)
-        data = np.append(data, np.zeros(16382/2-n_total*n_data))*vmax
-        if inverted:
-            data = vmax - data
-        self.send_analog_singlebuffer(data, ScanRate, out_num, dac_num)
-
-
-    def send_analog_singlebuffer(self, data, ScanRate, out_num = 0, dac_num = 0):
-
+        print("scanrate:", ScanRate, n_down, n_up)
+        
+        data = (np.ones((n_data,n_total))*np.array([data_1]*n_up+[data_0]*n_down)).flatten()
+        data_stream[1:data.shape[0]+1] = data        
+        data_stream[0] = data_0
+        data_stream[data.shape[0]+1:] = data_0
         self.stop_streaming()
+        self.write("FIO_DIRECTION", 254) # make DIO0 readonly
         r = self.write("STREAM_SCANRATE_HZ", ScanRate)
+
+        self.write("STREAM_TRIGGER_INDEX", 0) # make sure trigger is disabled
+        self.write("STREAM_CLOCK_SOURCE", 0) # internal
+
+        if external:
+            # by default use DIO0 as trigger
+            trigger_port = "DIO0"
+            self.write("STREAM_TRIGGER_INDEX", ljm.nameToAddress(trigger_port)[0])
+            self.write(trigger_port+"_EF_ENABLE", 0) # clear flag
+            self.write(trigger_port+"_EF_INDEX", 12) # rising edge
+            self.write(trigger_port+"_EF_ENABLE", 1)
+        
+            ljm.writeLibraryConfigS(ljm.constants.STREAM_SCANS_RETURN, ljm.constants.STREAM_SCANS_RETURN_ALL_OR_NONE)
+            ljm.writeLibraryConfigS(ljm.constants.STREAM_RECEIVE_TIMEOUT_MS, 0) # by default time out
         #print("setting scan rate to {0}".format(r))
-        self.map_stream_output(out_num, "DAC{0}".format(dac_num), buffersize=16384)
+        self.map_stream_output(out_num, "FIO_STATE", buffersize=16384)
         self.start_streaming("STREAM_OUT{0}".format(out_num))
-        self.data_to_singlebuffer(out_num, data, buffertype = "F32")
-
-
+        self.data_to_singlebuffer(out_num, data_stream, buffertype = "U16")
+        
+        
     def data_to_singlebuffer(self, out_num, data, buffertype = "F32"):
 
         bytesperdata = int(buffertype[1:])/16
@@ -170,78 +135,10 @@ class T7_ID26:
             r = self.write("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num), 0)
             r = self.write("STREAM_OUT{0}_ENABLE".format(out_num), 1)
             # print("Enabling output{0}...{1}".format(out_num, r==1))
-        # print("Writing data into buffer") # very important ! has to be dne after setting nloop
+        # print("Writing data into buffer") # very important ! has to be dne after setting loop
         self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num, buffertype), data)
-        self.write("STREAM_OUT{0}_SET_LOOP".format(out_num), 1, writeonly = True)
-        # print("Transferring data immediately") # will be replaced by trigger
-        
-          
-
-
-    def data_to_ringbuffer(self, out_num, data, buffertype = "F32"):
-
-        bytesperdata = int(buffertype[1:])/16
-        buffersize = int(self.read("STREAM_OUT{0}_BUFFER_ALLOCATE_NUM_BYTES".format(out_num[0])))
-        # print("buffersize on OUTPUT{0} is {1} bytes".format(out_num[0], buffersize))
-        # print("yourdata in {0} is {1} bytes".format(buffertype, data.shape[1]*bytesperdata))
-        if buffersize > data.shape[1]*bytesperdata:
-            for i in range(data.shape[0]):
-                # print("Infinite loop over existing data")
-                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 0)
-                # print("Disabling output{0}...{1}".format(out_num[i], r==0))
-                r = self.write("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]), data.shape[1])
-                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 1)
-                # print("Enabling output{0}...{1}".format(out_num[i], r==1))
-                r = self.read("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]))
-                # print("setting loop size to {0} values / {1} bytes".format(r, r*bytesperdata))
-                # print("Writing data into buffer") # very important ! has to be dne after setting nloop
-                self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), data[i])
-                self.write("STREAM_OUT{0}_SET_LOOP".format(out_num[i]), 2, writeonly = True)
-                # print("Transferring data immediately") # will be replaced by trigger
-        else:
-            if data.shape[1]%(buffersize/4):
-                ndata = (data.shape[1]/(buffersize/4)+1) * (buffersize/4)
-                # print("appending data with zeros")
-                data = np.append(data, np.zeros((data.shape[0],ndata-data.shape[1])), axis=1)
-            else:
-                ndata = data.shape[1]
-            data = data.reshape(data.shape[0], ndata/(buffersize/4), buffersize/4)
-            # print("stream will loop {0} times with size of {1}".format(data.shape[1], data.shape[2]))
-            for i in range(data.shape[0]):
-                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 1)
-                self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), np.zeros(buffersize/2))
-                self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), data[i,0])
-                # this is important, if not disabled, we cannot affect loop size!
-                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 0)
-                # print("Disabling output{0}...{1}".format(out_num[i], r==0))
-                r = self.write("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]), buffersize/4)
-                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 1)
-                # print("Enabling output{0}...{1}".format(out_num[i], r==1))
-                r = self.read("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]))
-                # print("setting loop size to {0} values / {1} bytes".format(r, r*bytesperdata))
-                # print("Writing initial data into half of the buffer")
-                self.write("STREAM_OUT{0}_SET_LOOP".format(out_num[i]), 1, writeonly = True)
-                # print("Transferring data immediately") # will be replaced by trigger
-            scanrate = self.read("STREAM_SCANRATE_HZ")
-            check_interval = 1/scanrate 
-            time.sleep(check_interval*10)
-            for j in range(1, data.shape[1]):
-                emptybuffer = self.read("STREAM_OUT{0}_BUFFER_STATUS".format(out_num[0]))
-                while emptybuffer*2 <buffersize/2:
-                    emptybuffer = self.read("STREAM_OUT{0}_BUFFER_STATUS".format(out_num[0]))
-                    nn = int(50*emptybuffer*2/buffersize)
-                    #print("\r{0:05d}/{1:05d} [".format(j,data.shape[1])+"|"*nn+" "*(50-nn)+"]"),
-                    time.sleep(check_interval)
-                # print("\rWriting data into buffer"),
-                for i in range(data.shape[0]):
-                    self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), data[i,j])
-                    self.write("STREAM_OUT{0}_SET_LOOP".format(out_num[i]), 1, writeonly = True)
-                time.sleep(check_interval*10)
-            self.stop_streaming()
-
-    def data_streamout(self):
-
-        self.write("STREAM_OUT3_SET_LOOP", 3, writeonly = True)
+        self.write("STREAM_OUT{0}_SET_LOOP".format(out_num), 2, writeonly = True)
+        # 2 = wait for sync, 1 = streamout immediately
         
 
     def map_stream_output(self, out_num, target, buffersize=4096):
@@ -297,6 +194,33 @@ class T7_ID26:
 
 
 """
+   def send_fakedigital_singlebuffer(self, data_raw, t1, t0 = 0.005, out_num = 0, dac_num = 0, vmax = 3.3, inverted = False):
+        
+        n_data = data_raw.shape[0]
+        n_total = int(16382/2/n_data)
+        n_down = max(int(round(t0/t1*n_total,0)), 1)
+        n_up = int(n_total - n_down)
+        ScanRate = 1/t1*n_total # trigger at rise edge
+        data = (np.ones((n_data,n_total))*np.array([1]*n_up+[0]*n_down)).flatten()
+        data = np.append(np.zeros(1), data)
+        data = np.append(data, np.zeros(16382/2-n_total*n_data))*vmax
+        if inverted:
+            data = vmax - data
+        self.send_analog_singlebuffer(data, ScanRate, out_num, dac_num)
+
+
+    def send_analog_singlebuffer(self, data, ScanRate, out_num = 0, dac_num = 0):
+
+        self.stop_streaming()
+        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
+        #print("setting scan rate to {0}".format(r))
+        self.map_stream_output(out_num, "DAC{0}".format(dac_num), buffersize=16384)
+        self.start_streaming("STREAM_OUT{0}".format(out_num))
+        self.data_to_singlebuffer(out_num, data, buffertype = "F32")
+
+
+
+
 #r = self.write("STREAM_SAMPLES_PER_PACKET", 1)
         #print("setting sample per package to {0}".format(r)) # this has no effect anyway
         #r = self.write("STREAM_TRIGGER_INDEX", 0)
@@ -365,7 +289,128 @@ class T7_ID26:
             self.stop_streaming()
                     
 
+   def send_fakedigital_ringbuffer(self, data_raw, t1, t0 = None, out_num = 0, dac_num = 0, buffersize = 4096, vmax = 3.3):
+        
+        if t0 == None:
+            t0 = t1 - 0.005 # up time has been fixed to 5 ms
+        ScanRate = 1000 # ScanRate has been fixed to 1kHz
+        #ScanRate = 5e3/(gcd(t0*1000,t1*1000))
+        if not isinstance(out_num, (list,)):
+            out_num = [out_num]; dac_num = [dac_num]; data_raw = data_raw[np.newaxis,:]
+        envelop = np.array([1]*int((t1-t0)*ScanRate)+[0]*int(t0*ScanRate))
+        data = np.zeros((data_raw.shape[0], data_raw.shape[1]*envelop.shape[0]))
+        for i in range(data.shape[0]):
+            data[i] = (envelop * np.c_[data_raw[i]>0]).flatten()*vmax
+        self.send_analog_ringbuffer(data, ScanRate, out_num, dac_num, buffersize)
 
 
+    def send_analog_ringbuffer(self, data, ScanRate, out_num = 0, dac_num = 0, buffersize = 4096):
+
+        if not isinstance(out_num, (list,)):
+            out_num = [out_num]; dac_num = [dac_num]; data = data[np.newaxis,:]
+        self.stop_streaming()
+        # print "Total data to be transmitted: {0}x{1} at {2} Hz".format(data.shape[0], data.shape[1], ScanRate)
+        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
+        # print("setting scan rate to {0}".format(r))
+        for i in range(data.shape[0]):
+            self.map_stream_output(out_num[i], "DAC{0}".format(dac_num[i]), buffersize=buffersize)
+        self.start_streaming(" ".join(map("STREAM_OUT{0}".format, out_num)).split())
+        self.data_to_ringbuffer(out_num, data, buffertype = "F32")
+
+    def send_digital(self, data, t1, buffersize=4096):
+
+        t0 = 0.01
+        ScanRate = 2e3/(gcd(t0*1000,t1*1000))
+        if ScanRate > 1000:
+            # print "ScanRate too high :", ScanRate
+            return 0
+        if len(data.shape) == 1:
+            data = (data[np.newaxis, :]>0)
+        self.stop_streaming()
+        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
+        # print("setting scan rate to {0}".format(r))
+        data = (data * np.arange(data.shape[0])[:,np.newaxis]).astype(int)
+        # print data.dtype
+        data = np.left_shift(1,data).sum(0)
+        data = (np.array([1]*int((t1-t0)*ScanRate)+[0]*int(t0*ScanRate)) * np.c_[data]).flatten()
+        data = data * np.ones(2,dtype=int).reshape(2,1)
+        # print data
+        data_inhib = 0x7FFFFF - data
+        # print "Total data to be transmitted: {0}x{1} at {2} Hz".format(data.shape[0], data.shape[1], ScanRate)
+        self.map_stream_output(0, "FIO_STATE", buffersize=buffersize)
+        self.map_stream_output(1, "FIO_DIRECTION", buffersize=buffersize)
+        #self.map_stream_output(2, "DIO_INHIBIT", buffersize=buffersize)
+        self.start_streaming(["STREAM_OUT0", "STREAM_OUT1"])
+        self.data_to_buffer([0, 1], data, buffertype = "U16")
+        self.stop_streaming()
+
+
+    def data_streamout(self):
+
+        self.write("STREAM_OUT3_SET_LOOP", 3, writeonly = True)
+    
+
+    def data_to_ringbuffer(self, out_num, data, buffertype = "F32"):
+
+        bytesperdata = int(buffertype[1:])/16
+        buffersize = int(self.read("STREAM_OUT{0}_BUFFER_ALLOCATE_NUM_BYTES".format(out_num[0])))
+        # print("buffersize on OUTPUT{0} is {1} bytes".format(out_num[0], buffersize))
+        # print("yourdata in {0} is {1} bytes".format(buffertype, data.shape[1]*bytesperdata))
+        if buffersize > data.shape[1]*bytesperdata:
+            for i in range(data.shape[0]):
+                # print("Infinite loop over existing data")
+                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 0)
+                # print("Disabling output{0}...{1}".format(out_num[i], r==0))
+                r = self.write("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]), data.shape[1])
+                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 1)
+                # print("Enabling output{0}...{1}".format(out_num[i], r==1))
+                r = self.read("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]))
+                # print("setting loop size to {0} values / {1} bytes".format(r, r*bytesperdata))
+                # print("Writing data into buffer") # very important ! has to be dne after setting nloop
+                self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), data[i])
+                self.write("STREAM_OUT{0}_SET_LOOP".format(out_num[i]), 2, writeonly = True)
+                # print("Transferring data immediately") # will be replaced by trigger
+        else:
+            if data.shape[1]%(buffersize/4):
+                ndata = (data.shape[1]/(buffersize/4)+1) * (buffersize/4)
+                # print("appending data with zeros")
+                data = np.append(data, np.zeros((data.shape[0],ndata-data.shape[1])), axis=1)
+            else:
+                ndata = data.shape[1]
+            data = data.reshape(data.shape[0], ndata/(buffersize/4), buffersize/4)
+            # print("stream will loop {0} times with size of {1}".format(data.shape[1], data.shape[2]))
+            for i in range(data.shape[0]):
+                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 1)
+                self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), np.zeros(buffersize/2))
+                self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), data[i,0])
+                # this is important, if not disabled, we cannot affect loop size!
+                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 0)
+                # print("Disabling output{0}...{1}".format(out_num[i], r==0))
+                r = self.write("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]), buffersize/4)
+                r = self.write("STREAM_OUT{0}_ENABLE".format(out_num[i]), 1)
+                # print("Enabling output{0}...{1}".format(out_num[i], r==1))
+                r = self.read("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num[i]))
+                # print("setting loop size to {0} values / {1} bytes".format(r, r*bytesperdata))
+                # print("Writing initial data into half of the buffer")
+                self.write("STREAM_OUT{0}_SET_LOOP".format(out_num[i]), 1, writeonly = True)
+                # print("Transferring data immediately") # will be replaced by trigger
+            scanrate = self.read("STREAM_SCANRATE_HZ")
+            check_interval = 1/scanrate 
+            time.sleep(check_interval*10)
+            for j in range(1, data.shape[1]):
+                emptybuffer = self.read("STREAM_OUT{0}_BUFFER_STATUS".format(out_num[0]))
+                while emptybuffer*2 <buffersize/2:
+                    emptybuffer = self.read("STREAM_OUT{0}_BUFFER_STATUS".format(out_num[0]))
+                    nn = int(50*emptybuffer*2/buffersize)
+                    #print("\r{0:05d}/{1:05d} [".format(j,data.shape[1])+"|"*nn+" "*(50-nn)+"]"),
+                    time.sleep(check_interval)
+                # print("\rWriting data into buffer"),
+                for i in range(data.shape[0]):
+                    self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num[i], buffertype), data[i,j])
+                    self.write("STREAM_OUT{0}_SET_LOOP".format(out_num[i]), 1, writeonly = True)
+                time.sleep(check_interval*10)
+            self.stop_streaming()
+
+    
 
 """
