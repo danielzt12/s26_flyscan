@@ -5,6 +5,7 @@ from fractions import gcd
 
 ljm.loadConstantsFromFile("/home/sector26/pythonscripts/Tao/flyscan/ljm_scripts/LJM/ljm_constants.json")
 #ljm.loadConstantsFromFile("/home/beams/USER26ID/ljm_scripts/LJM/ljm_startup_configs.json")
+ljm.writeLibraryConfigS("LJM_SEND_RECEIVE_TIMEOUT_MS", 20000)
 
 
 def listallT7():
@@ -39,26 +40,13 @@ class T7_ID26:
         output_file.close()
             
 
-    def start_streaming(self, ports):
+    def start_streaming(self):
 
-        if not isinstance(ports, (list,)):
-            ports = [ports]
-        NumAddr = len(ports)
-        Addr = []
-        for port in ports:
-            Addr += [ljm.nameToAddress(port)[0]]
-        
-        for i in range(NumAddr):
-            r = self.write("STREAM_SCANLIST_ADDRESS{0}".format(i), Addr[i])
-            # print Addr[i], r
-            # print("writing to scan list [{0}]...{1} ".format(i, r == Addr[i]))
-        r = self.write("STREAM_NUM_ADDRESSES", NumAddr)
-        # print("writing number of address = {0}".format(r))
         r = self.write("STREAM_ENABLE", 1)
         # print("stream enabled...{0}".format(r==1))
             
 
-    def stop_streaming(self):
+    def stop_streaming(self, NumAddr=0):
 
         r = self.read("STREAM_ENABLE")
         if r == 0:
@@ -68,41 +56,18 @@ class T7_ID26:
             r = self.write("STREAM_ENABLE", 0)
             # print "disabling stream just in case...", r==0
         # print "clean up the scan list just in case"
-        for i in range(128):
+        for i in range(NumAddr):
             if self.write("STREAM_SCANLIST_ADDRESS{0}".format(i), 0) != 0:
-                # print "problem!!!"
+                #print("problem!!!")
                 pass
         #print "setting DACs to 0..."
         #self.write("DAC0", 0)
         #self.write("DAC1", 0)
 
-
-    def send_digital(self, data_raw, t1, t0, inverted, out_num = 0, external = False):
-
-        data_stream = np.zeros((16384), dtype=np.uint16)
-        data_1 = 0
-        data_0 = 0
-        for i in range(len(inverted)):
-            if not inverted[i]:
-                data_1 += 2**(i+1)
-            else:
-                data_0 += 2**(i+1)
         
-        n_data = data_raw.shape[0]
-        n_total = int(16382/n_data) # removed two bits to make sure i can control the starting and ending bit
-        n_down = max(int(round(t0/t1*n_total,0)), 1)
-        n_up = int(n_total - n_down)
-        ScanRate = 1/t1*n_total # trigger at rise edge
-        print("scanrate:", ScanRate, n_down, n_up)
-        
-        data = (np.ones((n_data,n_total))*np.array([data_1]*n_up+[data_0]*n_down)).flatten()
-        data_stream[1:data.shape[0]+1] = data        
-        data_stream[0] = data_0
-        data_stream[data.shape[0]+1:] = data_0
-        self.stop_streaming()
+    def prepare_streaming(self, out_num = 0, external = False):
+
         self.write("FIO_DIRECTION", 254) # make DIO0 readonly
-        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
-
         self.write("STREAM_TRIGGER_INDEX", 0) # make sure trigger is disabled
         self.write("STREAM_CLOCK_SOURCE", 0) # internal
 
@@ -116,15 +81,58 @@ class T7_ID26:
         
             ljm.writeLibraryConfigS(ljm.constants.STREAM_SCANS_RETURN, ljm.constants.STREAM_SCANS_RETURN_ALL_OR_NONE)
             ljm.writeLibraryConfigS(ljm.constants.STREAM_RECEIVE_TIMEOUT_MS, 0) # by default time out
-        #print("setting scan rate to {0}".format(r))
-        self.map_stream_output(out_num, "FIO_STATE", buffersize=16384)
-        self.start_streaming("STREAM_OUT{0}".format(out_num))
-        self.data_to_singlebuffer(out_num, data_stream, buffertype = "U16")
-        
-        
-    def data_to_singlebuffer(self, out_num, data, buffertype = "F32"):
 
-        bytesperdata = int(buffertype[1:])/16
+        self.map_stream_output(out_num, "FIO_STATE", buffersize=16384)
+
+        ports = "STREAM_OUT{0}".format(out_num)
+        if not isinstance(ports, (list,)):
+            ports = [ports]
+        NumAddr = len(ports)
+        Addr = []
+        for port in ports:
+            Addr += [ljm.nameToAddress(port)[0]]
+        for i in range(NumAddr):
+            r = self.write("STREAM_SCANLIST_ADDRESS{0}".format(i), Addr[i])
+            # print Addr[i], r
+            # print("writing to scan list [{0}]...{1} ".format(i, r == Addr[i]))
+        r = self.write("STREAM_NUM_ADDRESSES", NumAddr)
+        # print("writing number of address = {0}".format(r))
+
+        
+    def send_digital(self, n_data, t1, inverted, delaypts, out_num = 0, external = False):
+
+        data_stream = np.zeros((8192), dtype=np.uint16)
+        data_1 = 0
+        data_0 = 0
+        for i in range(len(inverted)):
+            if not inverted[i]:
+                data_1 += 2**(i+1)
+            else:
+                data_0 += 2**(i+1)
+        
+        n_total = int((8192-4)/(n_data+delaypts)) # removed 4 bits to make sure i can control the starting and ending bit
+        n_down = max(int(round(0.001/t1*n_total,0)), 2)
+        #n_down = 2
+        n_up = int(n_total - n_down)
+        ScanRate = 1/t1*n_total # trigger at rise edge
+        #print("scanrate:", ScanRate, n_down, n_up)
+        
+        data = (np.ones((n_data,n_total))*np.array([data_1]*n_up+[data_0]*n_down)).flatten()
+        data_stream[2+delaypts*n_total:data.shape[0]+2+delaypts*n_total] = data        
+        data_stream[:2] = data_0
+        data_stream[data.shape[0]+2+delaypts*n_total:] = data_0
+        self.stop_streaming() 
+
+        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
+        #print("setting scan rate to {0}".format(r))
+        
+        self.start_streaming()
+        self.data_to_singlebuffer(out_num, data_stream, buffertype = "U16", mode = 2 if external else 1)
+        
+        
+    def data_to_singlebuffer(self, out_num, data, buffertype, mode):
+
+        #bytesperdata = int(buffertype[1:])/16
         buffersize = int(self.read("STREAM_OUT{0}_BUFFER_ALLOCATE_NUM_BYTES".format(out_num)))
         # print("buffersize on OUTPUT{0} is {1} bytes".format(out_num, buffersize))
         r = self.read("STREAM_OUT{0}_LOOP_NUM_VALUES".format(out_num))
@@ -137,11 +145,11 @@ class T7_ID26:
             # print("Enabling output{0}...{1}".format(out_num, r==1))
         # print("Writing data into buffer") # very important ! has to be dne after setting loop
         self.writearray("STREAM_OUT{0}_BUFFER_{1}".format(out_num, buffertype), data)
-        self.write("STREAM_OUT{0}_SET_LOOP".format(out_num), 2, writeonly = True)
+        self.write("STREAM_OUT{0}_SET_LOOP".format(out_num), mode, writeonly = True)
         # 2 = wait for sync, 1 = streamout immediately
         
 
-    def map_stream_output(self, out_num, target, buffersize=4096):
+    def map_stream_output(self, out_num, target, buffersize):
 
         r = self.write("STREAM_OUT{0}_ENABLE".format(out_num), 0)
         # print("Disabling output{0}...{1}".format(out_num, r==0))
@@ -185,15 +193,61 @@ class T7_ID26:
             print "Accepted variables are IPs or integers 1 2 3 4"
             print "type listallT7() to list the IPs"
         info = ljm.getHandleInfo(self.handle)
-        print("T7 device connected")
-        print("SN : {0}".format(info[2]))
-        print("IP : {0}".format(ljm.numberToIP(info[3])))
-        print("Port : {0}".format(info[4]))
-        print("MaxBytesPerMB : {0}".format(info[5]))
+        #print("T7 device connected")
+        #print("SN : {0}".format(info[2]))
+        print("Found T7 @ IP = {0}".format(ljm.numberToIP(info[3])))
+        #print("Port : {0}".format(info[4]))
+        #print("MaxBytesPerMB : {0}".format(info[5]))
 
 
 
 """
+    def send_digital_old(self, n_data, t1, t0, inverted, delaypts, out_num = 0, external = False):
+
+        data_stream = np.zeros((8192), dtype=np.uint16)
+        data_1 = 0
+        data_0 = 0
+        for i in range(len(inverted)):
+            if not inverted[i]:
+                data_1 += 2**(i+1)
+            else:
+                data_0 += 2**(i+1)
+        
+        n_total = int(8192/(n_data+delaypts)) # removed two bits to make sure i can control the starting and ending bit
+        n_down = max(int(round(t0/t1*n_total,0)), 1)
+        n_up = int(n_total - n_down)
+        ScanRate = 1/t1*n_total # trigger at rise edge
+        #print("scanrate:", ScanRate, n_down, n_up)
+        
+        data = (np.ones((n_data,n_total))*np.array([data_1]*n_up+[data_0]*n_down)).flatten()
+        data_stream[1+delaypts*n_total:data.shape[0]+1+delaypts*n_total] = data        
+        data_stream[0] = data_0
+        data_stream[data.shape[0]+1+delaypts*n_total:] = data_0
+        self.stop_streaming()
+        self.write("FIO_DIRECTION", 254) # make DIO0 readonly
+        r = self.write("STREAM_SCANRATE_HZ", ScanRate)
+
+        self.write("STREAM_TRIGGER_INDEX", 0) # make sure trigger is disabled
+        self.write("STREAM_CLOCK_SOURCE", 0) # internal
+
+        if external:
+            # by default use DIO0 as trigger
+            trigger_port = "DIO0"
+            self.write("STREAM_TRIGGER_INDEX", ljm.nameToAddress(trigger_port)[0])
+            self.write(trigger_port+"_EF_ENABLE", 0) # clear flag
+            self.write(trigger_port+"_EF_INDEX", 12) # rising edge
+            self.write(trigger_port+"_EF_ENABLE", 1)
+        
+            ljm.writeLibraryConfigS(ljm.constants.STREAM_SCANS_RETURN, ljm.constants.STREAM_SCANS_RETURN_ALL_OR_NONE)
+            ljm.writeLibraryConfigS(ljm.constants.STREAM_RECEIVE_TIMEOUT_MS, 0) # by default time out
+        #print("setting scan rate to {0}".format(r))
+        self.map_stream_output(out_num, "FIO_STATE", buffersize=16384)
+        self.start_streaming("STREAM_OUT{0}".format(out_num))
+        self.data_to_singlebuffer(out_num, data_stream, buffertype = "U16", mode = 2 if external else 1)
+
+
+
+
    def send_fakedigital_singlebuffer(self, data_raw, t1, t0 = 0.005, out_num = 0, dac_num = 0, vmax = 3.3, inverted = False):
         
         n_data = data_raw.shape[0]
